@@ -29,6 +29,7 @@
 #include <linux/mbus.h>
 #include "cipher.c"
 #include "mycrypto.h"
+#include <linux/spinlock.h>
 
 // struct my_crypto_dev *crypt_dev;
 // Adding or Registering algorithm instace of AEAD crypto
@@ -37,6 +38,7 @@ static int my_crypto_add_algs(struct aead_alg my_crypto_gcm_aes_alg)
 {
  int ret;
  ret = crypto_register_aead(&my_crypto_gcm_aes_alg);
+ printk(KERN_EMERG "ret value from crypto_register_aead \n", ret)
  if(ret)
   {crypto_unregister_aead(&my_crypto_gcm_aes_alg);}
  return ret;

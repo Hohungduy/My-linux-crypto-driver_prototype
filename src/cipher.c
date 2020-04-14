@@ -13,11 +13,13 @@
  */
 
 #include <crypto/aes.h>
+#include <crypto/gcm.h>
 #include <crypto/des.h>
 #include <crypto/aead.h>
 #include <crypto/internal/aead.h>
 #include <crypto/sha.h>
 #include "mycrypto.h"
+
 struct my_crypto_cipher_op{
  void *src;
  void *dst;
@@ -54,22 +56,50 @@ static void my_crypto_aead_cra_exit(struct crypto_tfm *tfm)
 {
 	
 }
-struct aead_alg my_crypto_gcm_aes_alg = {
-    .setkey = my_crypto_aead_aes_setkey,
-    .encrypt = my_crypto_aead_aes_encrypt,
-    .decrypt = my_crypto_aead_aes_decrypt,
-    .ivsize = AES_BLOCK_SIZE,
-    .maxauthsize = SHA256_DIGEST_SIZE,
-    .base = {
-        	.cra_name = "gcm(aes)",
-			.cra_driver_name = "my_crypto_gcm_aes",
-			.cra_priority = 300,
-			.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY,
-			.cra_blocksize = AES_BLOCK_SIZE,
-			.cra_ctxsize = sizeof(struct my_crypto_cipher_op),
-			.cra_alignmask = 0,
-			.cra_init = my_crypto_aead_cra_init,
-			.cra_exit = my_crypto_aead_cra_exit,
-			.cra_module = THIS_MODULE
-    },
+struct mycrypto_alg_template mycrypto_alg_gcm_aes = {
+    .type = MYCRYPTO_ALG_TYPE_AEAD,
+	.alg.aead = {
+			.setkey = my_crypto_aead_aes_setkey,
+    		.encrypt = my_crypto_aead_aes_encrypt,
+    		.decrypt = my_crypto_aead_aes_decrypt,
+    		.ivsize = 12,
+			.maxauthsize = SHA256_DIGEST_SIZE,
+    		.base = {
+        			.cra_name = "authenc(hmac(sha256),ctr(aes))",
+					.cra_driver_name = "mycrypto_gcm_aes",
+					.cra_priority = 250,
+					.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY,
+					.cra_blocksize = 1,
+					.cra_ctxsize = sizeof(struct my_crypto_cipher_op),
+					.cra_alignmask = 0,
+					.cra_init = my_crypto_aead_cra_init,
+					.cra_exit = my_crypto_aead_cra_exit,
+					.cra_module = THIS_MODULE,
+    		},
+	},
 };
+
+struct mycrypto_alg_template mycrypto_alg_authenc_hmac_sha256_cbc_aes = {
+    .type = MYCRYPTO_ALG_TYPE_AEAD,
+	.alg.aead = {
+			.setkey = my_crypto_aead_aes_setkey,
+    		.encrypt = my_crypto_aead_aes_encrypt,
+    		.decrypt = my_crypto_aead_aes_decrypt,
+    		.ivsize = AES_BLOCK_SIZE,
+			.maxauthsize = SHA256_DIGEST_SIZE,
+    		.base = {
+        			.cra_name = "authenc(hmac(sha256),ctr(aes))",
+					.cra_driver_name = "mycrypto_gcm_aes",
+					.cra_priority = 300,
+					.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY,
+					.cra_blocksize = AES_BLOCK_SIZE,
+					.cra_ctxsize = sizeof(struct my_crypto_cipher_op),
+					.cra_alignmask = 0,
+					.cra_init = my_crypto_aead_cra_init,
+					.cra_exit = my_crypto_aead_cra_exit,
+					.cra_module = THIS_MODULE,
+    		},
+	},
+};
+
+

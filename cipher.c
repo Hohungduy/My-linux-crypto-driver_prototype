@@ -2,7 +2,7 @@
  * Support for Cryptographic Engine in FPGA card using PCIe interface
  * that can be found on the following platform: Armada. 
  *
- * Author: Duy H.Ho <duyhungho.work@gmail.com>
+ * Author: Duy H.Ho <duyhohung.work@gmail.com>
  *
  * This work is based on an initial version written by
  * Sebastian Andrzej Siewior < sebastian at breakpoint dot cc >
@@ -18,6 +18,7 @@
 #include <crypto/internal/aead.h>
 #include <crypto/sha.h>
 #include "mycrypto.h"
+
 struct my_crypto_cipher_op{
  void *src;
  void *dst;
@@ -28,8 +29,8 @@ struct my_crypto_cipher_op{
  u8 key[AES_KEYSIZE_128];
  u8 *iv;
  u32 keylen;
- 
 };
+
 // Note the cra_aligmask
 //struct AEAD algorithm which is registered after driver probing
 static int my_crypto_aead_aes_setkey(struct crypto_aead *cipher, const u8 *key,unsigned int len)
@@ -70,6 +71,6 @@ struct aead_alg my_crypto_gcm_aes_alg = {
 			.cra_alignmask = 0,
 			.cra_init = my_crypto_aead_cra_init,
 			.cra_exit = my_crypto_aead_cra_exit,
-			.cra_module = THIS_MODULE
+			.cra_module = THIS_MODULE,
     },
 };
