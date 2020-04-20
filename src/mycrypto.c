@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/scatterlist.h>
+#include <linux/genalloc.h>
 #include <linux/slab.h>
 #include <linux/clk.h>
 #include <linux/of.h>
@@ -27,6 +28,10 @@
 #include <linux/io.h>
 #include <linux/kthread.h>
 #include <linux/mbus.h>
+#include <linux/workqueue.h>
+#include <linux/timer.h>
+#include <linux/jiffies.h> /* get system time */
+#include <linux/timekeeping.h>
 //#include "cipher.c"
 #include <crypto/aes.h>
 #include <crypto/gcm.h>
@@ -35,100 +40,112 @@
 #include <crypto/internal/aead.h>
 #include <crypto/sha.h>
 #include "mycrypto.h"
+/* Limit of the crypto queue before reaching the backlog */
+#define MYCRYPTO_DEFAULT_MAX_QLEN 128
+// global variable for device
+struct mycrypto_dev *mydevice_glo;
+//struct timer_list mycrypto_ktimer;
 
-
-// Adding or Registering algorithm instace of AEAD crypto
+// static int my_crypto_add_algs(struct mycrypto_dev *mydevice)
 static struct mycrypto_alg_template *mycrypto_algs[] ={
 	&mycrypto_alg_authenc_hmac_sha256_cbc_aes,
+	&mycrypto_alg_authenc_hmac_sha256_ctr_aes,
 	&mycrypto_alg_gcm_aes,
+	&mycrypto_alg_cbc_aes
 };
-// struct my_crypto_cipher_op{
-//  void *src;
-//  void *dst;
-//  u32 dir;
-//  u32 flags;
-//  u32 mode;
-//  int len;
-//  u8 key[AES_KEYSIZE_128];
-//  u8 *iv;
-//  u32 keylen;
- 
-// };
-// // Note the cra_aligmask
-// //struct AEAD algorithm which is registered after driver probing
-// static int my_crypto_aead_aes_setkey(struct crypto_aead *cipher, const u8 *key,unsigned int len)
-// {
-// 	return 0;
-// }
-// static int my_crypto_aead_aes_encrypt(struct aead_request *req)
-// {
-// 	printk(KERN_INFO "hello world my_crypto_aead_aes_encrypt \n");
-// 	return 0;
-// }
-// static int my_crypto_aead_aes_decrypt(struct aead_request *req)
-// {
-// 	printk(KERN_INFO "hello world my_crypto_aead_aes_decrypt \n");
-// 	return 0;
-// }
-// static int my_crypto_aead_cra_init(struct crypto_tfm *tfm)
-// {
-// 	return 0;
-// }
-// static void my_crypto_aead_cra_exit(struct crypto_tfm *tfm)
-// {
-	
-// }
-// struct mycrypto_alg_template mycrypto_alg_gcm_aes = {
-//     .type = MYCRYPTO_ALG_TYPE_AEAD,
-// 	.alg.aead = {
-// 			.setkey = my_crypto_aead_aes_setkey,
-//     		.encrypt = my_crypto_aead_aes_encrypt,
-//     		.decrypt = my_crypto_aead_aes_decrypt,
-//     		.ivsize = 12,
-// 			.maxauthsize = SHA256_DIGEST_SIZE,
-//     		.base = {
-//         			.cra_name = "authenc(hmac(sha256),ctr(aes))",
-// 					.cra_driver_name = "mycrypto_gcm_aes",
-// 					.cra_priority = 250,
-// 					.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY,
-// 					.cra_blocksize = 1,
-// 					.cra_ctxsize = sizeof(struct my_crypto_cipher_op),
-// 					.cra_alignmask = 0,
-// 					.cra_init = my_crypto_aead_cra_init,
-// 					.cra_exit = my_crypto_aead_cra_exit,
-// 					.cra_module = THIS_MODULE,
-//     		},
-// 	},
-// };
+static void mycrypto_tasklet_callback(unsigned long data)
+{
 
-// struct mycrypto_alg_template mycrypto_alg_authenc_hmac_sha256_cbc_aes = {
-//     .type = MYCRYPTO_ALG_TYPE_AEAD,
-// 	.alg.aead = {
-// 			.setkey = my_crypto_aead_aes_setkey,
-//     		.encrypt = my_crypto_aead_aes_encrypt,
-//     		.decrypt = my_crypto_aead_aes_decrypt,
-//     		.ivsize = AES_BLOCK_SIZE,
-// 			.maxauthsize = SHA256_DIGEST_SIZE,
-//     		.base = {
-//         			.cra_name = "authenc(hmac(sha256),cbc(aes))",
-// 					.cra_driver_name = "mycrypto_alg_authenc_hmac_sha256_cbc_aes",
-// 					.cra_priority = 300,
-// 					.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_KERN_DRIVER_ONLY,
-// 					.cra_blocksize = AES_BLOCK_SIZE,
-// 					.cra_ctxsize = sizeof(struct my_crypto_cipher_op),
-// 					.cra_alignmask = 0,
-// 					.cra_init = my_crypto_aead_cra_init,
-// 					.cra_exit = my_crypto_aead_cra_exit,
-// 					.cra_module = THIS_MODULE,
-//     		},
-// 	},
-// };
-// static int my_crypto_add_algs(struct mycrypto_dev *mydevice)
-static int my_crypto_add_algs(void)
+}
+static inline void mycrypto_handle_result(struct mycrypto_dev *mydevice)
+{
+	struct crypto_async_request *req;
+	struct mycrypto_req_operation *opr_ctx;
+	int ret;
+	bool should_complete;
+	req = mydevice->req;
+	printk(KERN_INFO "Module mycrypto: handle result\n");
+	opr_ctx = crypto_tfm_ctx(req->tfm);
+	ret = opr_ctx->handle_result(req, &should_complete);
+	if (should_complete) 
+	{
+			local_bh_disable();
+			req->complete(req, ret);
+			local_bh_enable();
+	}
+	printk(KERN_INFO "Module mycrypto: callback successfully \n");
+
+}
+
+struct crypto_async_request *mycrypto_dequeue_req_locked(struct mycrypto_dev *mydevice,
+			   struct crypto_async_request **backlog)
+{
+	struct crypto_async_request *req;
+	*backlog = crypto_get_backlog(&mydevice->queue);
+	req = crypto_dequeue_request(&mydevice->queue);
+	if (!req)
+		return NULL;
+	return req;
+}
+static void mycrypto_dequeue_req(struct mycrypto_dev *mydevice)
+{
+	printk(KERN_INFO "module mycrypto: dequeue request (after a period time by using workqueue)\n");
+	struct crypto_async_request *req = NULL, *backlog = NULL;
+	struct mycrypto_req_operation *opr_ctx;
+	spin_lock_bh(&mydevice->queue_lock);
+	if (!mydevice->req) {
+		req = mycrypto_dequeue_req_locked(mydevice, &backlog);
+		mydevice->req = req;
+	}
+	spin_unlock_bh(&mydevice->queue_lock);
+	if (!req)
+		return;
+	if (backlog)
+		backlog->complete(backlog, -EINPROGRESS);
+	opr_ctx = crypto_tfm_ctx(req->tfm);
+	opr_ctx->handle_request(req);
+	mod_timer(&mydevice->mycrypto_ktimer,jiffies + 1*HZ);
+}
+static void mycrypto_dequeue_work(struct work_struct *work)
+{
+	struct mycrypto_work_data *data =
+			container_of(work, struct mycrypto_work_data, work);
+	mycrypto_dequeue_req(data->mydevice);
+}
+//--------------------------------------------------------------------
+//--------------timer handler---------------------------------------
+static void handle_timer(struct timer_list *t)
+{
+	printk(KERN_INFO "Module mycrypto: HELLO timer\n");
+	struct mycrypto_dev *mydevice =from_timer(mydevice,t,mycrypto_ktimer);
+	if (!mydevice){
+		printk(KERN_ERR "CAN NOT HANDLE A null POINTER\n");
+		return;
+	}
+	
+	mycrypto_handle_result(mydevice);
+	queue_work(mydevice->workqueue,
+		   &mydevice->work_data.work);
+	// handle result copy from buffer and callback
+	// dequeue again
+	//mycrypto_skcipher_handle_result()
+	//mod_timer(&mycrypto_ktimer, jiffies + 2*HZ);
+}
+// static void configure_timer(struct timer_list *mycrypto_ktimer)
+// {
+// 	struct mycrypto_dev * mydevice_glo;
+// 	mycrypto_ktimer->expires = jiffies + 2*HZ ;
+// 	mycrypto_ktimer->function = handle_timer;
+// 	mycrypto_ktimer->data = (unsigned long)(mydevice_glo);
+
+// }
+//------------------------------------------------------------
+// Adding or Registering algorithm instace of AEAD /SK cipher crypto
+static int mycrypto_add_algs(struct mycrypto_dev *mydevice)
 {
  int i,j,ret = 0;
  for (i = 0; i < ARRAY_SIZE(mycrypto_algs); i++) {
-		//mycrypto_algs[i]->mydevice = mydevice;
+		mycrypto_algs[i]->mydevice = mydevice_glo;
 		if (mycrypto_algs[i]->type == MYCRYPTO_ALG_TYPE_SKCIPHER)
 			ret = crypto_register_skcipher(&mycrypto_algs[i]->alg.skcipher);
 		else if (mycrypto_algs[i]->type == MYCRYPTO_ALG_TYPE_AEAD)
@@ -136,12 +153,10 @@ static int my_crypto_add_algs(void)
 		else
 			ret = crypto_register_ahash(&mycrypto_algs[i]->alg.ahash);
  }
-//  ret = crypto_register_aead(alg);
  if(ret)
 	goto fail;
  return 0;
 fail:
-	//   crypto_unregister_aead(alg);
  for (j = 0; j < i; j++) {
 		if (mycrypto_algs[j]->type == MYCRYPTO_ALG_TYPE_SKCIPHER)
 			crypto_unregister_skcipher(&mycrypto_algs[j]->alg.skcipher);
@@ -152,24 +167,97 @@ fail:
 	}
 	  return ret;
 }
+static void mycrypto_remove_algs(struct mycrypto_dev *mydevice)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(mycrypto_algs); i++) {
+		if (mycrypto_algs[i]->type == MYCRYPTO_ALG_TYPE_SKCIPHER)
+			crypto_unregister_skcipher(&mycrypto_algs[i]->alg.skcipher);
+		else if (mycrypto_algs[i]->type == MYCRYPTO_ALG_TYPE_AEAD)
+			crypto_unregister_aead(&mycrypto_algs[i]->alg.aead);
+		else
+			crypto_unregister_ahash(&mycrypto_algs[i]->alg.ahash);
+	}
+	printk(KERN_INFO "unregister 3 types of algorithms \n");
+}
+static int mycrypto_probe(void){
+	struct mycrypto_dev *mydevice;
+	int ret;
+	if (mydevice_glo) {
+		printk(KERN_INFO "ONLY 1 DEVICE AUTHORIZED");
+		return -EEXIST;
+	}
+	mydevice = kzalloc(sizeof(*mydevice), GFP_KERNEL);
+	if(!mydevice)
+	{
+		printk("failed to allocate data structure for device driver\n");
+		return -ENOMEM;
+	}
+	mydevice->buffer = kzalloc(BUFFER_SIZE, GFP_KERNEL);
+	crypto_init_queue(&mydevice->queue, MYCRYPTO_DEFAULT_MAX_QLEN);
+	INIT_LIST_HEAD(&mydevice->complete_queue);
+	// create workqueue and tasklet
+	tasklet_init(&mydevice->tasklet, mycrypto_tasklet_callback, (unsigned long)mydevice);
+	mydevice_glo = mydevice;
+	mydevice->work_data.mydevice = mydevice;
+	INIT_WORK(&mydevice->work_data.work, mycrypto_dequeue_work);
+	mydevice->workqueue = create_singlethread_workqueue("my_single_thread_workqueue");
+	if (!mydevice->workqueue) {
+			ret = -ENOMEM;
+			goto err_reg_clk;
+	}
+	ret = mycrypto_add_algs(mydevice);
+	if (ret){
+	printk(KERN_INFO "Failed to register algorithms\n");
+	}
+	printk("device successfully registered \n");
+	timer_setup(&mydevice->mycrypto_ktimer,handle_timer,0);
+	printk(KERN_INFO "mydevice pointer: %px \n",mydevice);
+	printk(KERN_INFO "mydevice_glo pointer: %px \n",mydevice_glo);
+	printk(KERN_INFO "VALUE OF flags: %d \n", mydevice->flags);
+	printk(KERN_INFO "buffer stores request (in mydevice):%px \n", &mydevice->buffer);
+	printk(KERN_INFO "req of mydevice:%px \n",&mydevice->req);
+	printk(KERN_INFO "backlof req of mydevice:%px \n",&mydevice->backlog);
+
+	//mod_timer(&mydevice->mycrypto_ktimer, jiffies + 2*HZ);
+	return 0;
+err_reg_clk:
+	printk(KERN_INFO "ERROR REG_CLK AND WORKQUEUE");
+	return 0;
+}
 //entry point when driver was loaded
 static int __init FPGAcrypt_init(void) 
 {
  //struct mycrypto_dev *mydevice;
- int ret;
- printk(KERN_INFO "Hello, World!\n");
- ret = my_crypto_add_algs();
- if (ret){
-	 printk(KERN_INFO "Failed to register algorithms\n");
- }
+ // Register probe
+ 
+	printk(KERN_INFO "Hello, World!\n");
+ //probe with simulation
+	mycrypto_probe();
+	//mod_timer(&mydevice_glo->mycrypto_ktimer, jiffies + 4*HZ);
+//  //-------init kernel timer--------------//
+// 	init_timers(&mycrypto_ktimer);
+// 	configure_timer(&mycrypto_ktimer);
+
+// 	// -- TIMER START
+// 	add_timer(&mycrypto_ktimer);
+
  return 0;
 }
 
 //entry point when driver was remove
 static void __exit FPGAcrypt_exit(void) 
 {
- printk(KERN_INFO "Goodbye, World!\n");
+	mycrypto_remove_algs(mydevice_glo);
+	kfree(mydevice_glo);
+	flush_workqueue(mydevice_glo->workqueue);
+    destroy_workqueue(mydevice_glo->workqueue);
+	//-----------delete timer------------------
+	del_timer_sync(&mydevice_glo->mycrypto_ktimer);
+	printk(KERN_INFO "Delete workqueue and unregister algorithms\n");
+	printk(KERN_INFO "Goodbye, World!\n");
 }
+
 module_init(FPGAcrypt_init);
 module_exit(FPGAcrypt_exit);
 
