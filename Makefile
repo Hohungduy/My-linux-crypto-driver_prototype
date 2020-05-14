@@ -23,7 +23,7 @@ PKG_LICENSE_FILES:=COPYING
 
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 MODULE_FILES=$(PKG_BUILD_DIR)/*.$(LINUX_KMOD_SUFFIX)
-MODULE_HEADER:=$(PKG_NAME).h
+#MODULE_HEADER:=$(PKG_NAME).h
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -89,7 +89,9 @@ endef
 
 define Build/InstallDev
 	$(INSTALL_DIR) $(STAGING_DIR)/usr/include/crypto
-	$(CP) $(PKG_BUILD_DIR)/mycrypto.h $(STAGING_DIR)/usr/include/crypto/
+	$(CP) $(PKG_BUILD_DIR)/include/mycrypto.h $(STAGING_DIR)/usr/include/crypto/
+	$(CP) $(PKG_BUILD_DIR)/include/cipher.h $(STAGING_DIR)/usr/include/crypto/
+	$(CP) $(PKG_BUILD_DIR)/include/common.h $(STAGING_DIR)/usr/include/crypto/
 endef
 
 $(eval $(call KernelPackage,mycrypto))

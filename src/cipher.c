@@ -9,82 +9,21 @@
  * by the Free Software Foundation.
  */
 
-#include <crypto/aes.h>
-#include <crypto/gcm.h>
-#include <crypto/des.h>
-#include <crypto/aead.h>
-#include <crypto/internal/aead.h>
-#include <crypto/sha.h>
-#include <crypto/authenc.h>
-#include "mycrypto.h"
 
-/* driver logic flags */
-#define AES_MODE_CBC 0
-#define AES_MODE_GCM 1
-#define AES_MODE_AUTHENC_HMAC_CBC 2
-#define AES_MODE_AUTHENC_HMAC_CTR 3
+#include "include/mycrypto.h"
+#include "include/common.h"
+#include "include/cipher.h"
 
-#define MYCRYPTO_DIR_DECRYPT 0
-#define MYCRYPTO_DIR_ENCRYPT 1
-static int mycrypto_skcipher_handle_request(struct crypto_async_request *base);
-static int mycrypto_skcipher_handle_result(struct crypto_async_request *base,bool *should_complete);
-/* transformation object context
-* it is stored in tfm ->__crt_ctx
-* and tfm = req->base.tfm 
-*
+
+/*	Test function for a typical handle request :
+	- This function is registered in cra_init function.
+	- Using for testing data flow.
 */
-
-// base: filled in cra_init
-// mydevice: filled in cra_init
-// src/dst:
-// dir: filled mycrypto_queue_req
-// flags:
-//mode: filled in mycrypto_queue_req
-//len : filled in mycrypto_queue_req
-// key: filled in setkey
-//keylen: filled in setkey
-//iv filled in mycrypto_queue_req
-
-struct mycrypto_cipher_op{
-	struct mycrypto_req_operation base;
-	struct mycrypto_dev *mydevice;
-	void *src;// src data -before operation
-	void *dst;// dest data -after operation
-	u32 dir; // direction
-	u32 flags;
-	u32 mode;//algoritm used
-	int len;// blocksize
-	u8 key[AES_KEYSIZE_128];// key
-	u8 *iv; //iv pointer
-	u32 keylen;//keylen
-	/* all the belows is using for AEAD specific*/
-	u32 hash_alg;
-	u32 state_sz;
-	__be32 ipad[SHA512_DIGEST_SIZE / sizeof(u32)];
-	__be32 opad[SHA512_DIGEST_SIZE / sizeof(u32)];
-
-	/* use for gcm */
-	struct crypto_cipher *hkaes;// transformation object
-};
-
-/*
- *  struct mycrypto_cipher_req -- cipher request ctx 
- *  which is stored in req ->_ctx
- * @src_nents:	number of entries in the src sg list
- * @dst_nents:	number of entries in the dest sg list
-*/
-// dir: filled in mycrypto_queue_req
-// src_nents + dst_nents: filled in mycrypto_skcipher_req_init
-struct mycrypto_cipher_req{
-	u32 dir; // direction ( encrypt or decrypt)
-	int src_nents;
-	int dst_nents;
-};
 
 static int mycrypto_skcipher_handle_request(struct crypto_async_request *base)
 {
 	//int ret;
-	printk(KERN_INFO "module mycrypto: handle request (copy to buffer)\n");
+	
 	struct skcipher_request *req = skcipher_request_cast(base);
 	struct mycrypto_cipher_op *ctx = crypto_tfm_ctx(req->base.tfm);
 	// context for transformation object
@@ -92,6 +31,7 @@ static int mycrypto_skcipher_handle_request(struct crypto_async_request *base)
 	//context for skcipher request
 	struct mycrypto_dev *mydevice = ctx->mydevice;
 	size_t len = (size_t)req->cryptlen;
+	printk(KERN_INFO "module mycrypto: handle request (copy to buffer)\n");
 	//ret = mycrypto_handle_request(base,req_ctx,req->src,req->dst,req->cryptlen,0,0,req->iv);
 	len = sg_pcopy_to_buffer(req->src, req_ctx->src_nents,
 				 mydevice->buffer,
@@ -99,21 +39,36 @@ static int mycrypto_skcipher_handle_request(struct crypto_async_request *base)
 	// Turn on timer.
 	return 0;
 }
+
+/*	Test function for a typical handle result :
+	- This function is registered in cra_init function.
+	- Using for testing data flow.
+	- Using for testing with the lower layer of driver (pcie layer).
+*/
+
 static int mycrypto_skcipher_handle_result(struct crypto_async_request *base, bool *should_complete)
 {
 	//int ret;
-	printk(KERN_INFO "module mycrypto: handle request (copy from buffer)\n");
+	
 	struct skcipher_request *req = skcipher_request_cast(base);
 	struct mycrypto_cipher_op *ctx = crypto_tfm_ctx(req->base.tfm);
 	struct mycrypto_cipher_req *req_ctx = skcipher_request_ctx(req);
 	struct mycrypto_dev *mydevice = ctx->mydevice;
 	size_t len = (size_t)req->cryptlen;
+	printk(KERN_INFO "module mycrypto: handle request (copy from buffer)\n");
 	len = sg_pcopy_from_buffer(req->dst, req_ctx->dst_nents,
 				 mydevice->buffer,
 				 len, 0);
 	*should_complete = true;
 	return 0;
 }
+
+/* Using for checking:
+
+   -  whether or not the length of request and block size accommodate the critetia.
+   -  The number of entries in src and dst list.
+
+*/
 static int mycrypto_skcipher_req_init(struct skcipher_request *req)
 {
 	struct mycrypto_cipher_req *req_ctx = skcipher_request_ctx(req);
@@ -136,29 +91,43 @@ static int mycrypto_skcipher_req_init(struct skcipher_request *req)
 
 }
 
+/*
+   This function facilitates us to process request with queue 
+   - Copy all parameters for encr/decr process into the context of operation (transformation objects) 
+   and the context of request.
+   - Enqueue the request into crypto queue.
+   - Set schedule for workqueue task to dequeue this request in the future.
+   
+*/
 static int mycrypto_queue_req(struct crypto_async_request *base,
 			struct mycrypto_cipher_req *req_ctx,
 			u32 dir, u32 mode)
 {
-	printk(KERN_INFO "module mycrypto: enqueue request\n");
+	
 	struct mycrypto_cipher_op *ctx = crypto_tfm_ctx(base->tfm);
+	// Get the context for transformation object
 	struct skcipher_request *req = skcipher_request_cast(base);
+	// Get skcipher request from its asysc request.
 	struct mycrypto_dev *mydevice = ctx->mydevice;
 	int ret;
+	printk(KERN_INFO "module mycrypto: enqueue request\n");
+
 	req_ctx->dir = dir;
 	ctx->mode = mode;
 	ctx->dir =dir;
 	ctx->len = AES_BLOCK_SIZE;
 	ctx->iv = req->iv;
+	
 	spin_lock_bh(&mydevice->queue_lock);
+	// enqueue request.
 	ret = crypto_enqueue_request(&mydevice->queue, base);
 	spin_unlock_bh(&mydevice->queue_lock);
-	// dequeue using workqueue;
-
+	
+	// dequeue using workqueue
 	queue_work(mydevice->workqueue,
 		   &mydevice->work_data.work);
 
-	// dequeue without using workqueue (test)
+	// dequeue without using workqueue (testing ...)
 	//mycrypto_dequeue_req(mydevice);
 	return ret;
 }
@@ -192,35 +161,42 @@ static int my_crypto_skcipher_aes_setkey(struct crypto_skcipher *cipher, const u
 	return 0;
 }
 static int my_crypto_cbc_aes_encrypt(struct skcipher_request *req)
-{
-	printk(KERN_INFO "Module mycrypto: mycrypto_skcipher_aes_encrypt \n");
-	// Queue request-------
-		// -------------------------------------------------------
-	//check request ( src number entry / dst number entry)
+{	
 	int ret;
 	//struct skcipher_request *req = skcipher_request_cast(base);
 	//struct mycrypto_cipher_req *req_ctx = skcipher_request_ctx(req);
+	printk(KERN_INFO "Module mycrypto: mycrypto_skcipher_aes_encrypt \n");
+	/* checking the number of entries in scattergather list */
 	ret = mycrypto_skcipher_req_init(req);
 	if (ret)
 		printk(KERN_INFO "ERROR SRC/DEST NUMBER OF ENTRY\n");
 	//----------------------------------------------------
+	// processing the queue of this request
 	return mycrypto_queue_req(&req->base, skcipher_request_ctx(req),
 			MYCRYPTO_DIR_ENCRYPT, AES_MODE_CBC);
 }
 static int my_crypto_cbc_aes_decrypt(struct skcipher_request *req)
 {
+	
+	int ret;
+	//struct skcipher_request *req = skcipher_request_cast(base);
+	//struct mycrypto_cipher_req *req_ctx = skcipher_request_ctx(req);
+	ret = mycrypto_skcipher_req_init(req);
 	printk(KERN_INFO "Module mycrypto: mycrypto_skcipher_aes_decrypt \n");
+	if (ret)
+		printk(KERN_INFO "ERROR SRC/DEST NUMBER OF ENTRY\n");
 	return mycrypto_queue_req(&req->base, skcipher_request_ctx(req),
 			MYCRYPTO_DIR_DECRYPT, AES_MODE_CBC);
 }
 
 static int my_crypto_skcipher_cra_init(struct crypto_tfm *tfm)
 {
-	printk(KERN_INFO "Module mycrypto: my_crypto_skcipher_cra_init\n");
+	
 	struct mycrypto_cipher_op *ctx = crypto_tfm_ctx(tfm);
 	struct mycrypto_alg_template *tmpl =
 		container_of(tfm->__crt_alg, struct mycrypto_alg_template,
 			     alg.skcipher.base);
+	printk(KERN_INFO "Module mycrypto: my_crypto_skcipher_cra_init\n");
 	// it means that tfm->__crt_alg
 	crypto_skcipher_set_reqsize(__crypto_skcipher_cast(tfm),
 				    sizeof(struct mycrypto_cipher_req));
@@ -253,8 +229,8 @@ static int my_crypto_aead_aes_setkey(struct crypto_aead *cipher, const u8 *key,u
 		goto badkey;
 	if (keys.enckeylen > sizeof(ctx->key))
 		goto badkey;
-	//---------------------------------------------------
-	//-----------Lack of authenc hash - set key
+	//-----------------------------------------------------------------
+	//----------- Lack of authenc hash - set key -----------------------
 	crypto_aead_set_flags(cipher, crypto_aead_get_flags(cipher) &
 				    CRYPTO_TFM_RES_MASK);
 	/* Now copy the keys into the context */
